@@ -23,8 +23,8 @@ from robstride_dynamics import RobstrideBus, Motor
 # ── Configuration ─────────────────────────────────────────────────────────────
 CAN_CHANNEL          = 'can0'
 BITRATE              = 1_000_000   # bps
-MOTOR_ID             = 3
-MOTOR_MODEL          = 'rs-00'
+MOTOR_ID             = 127
+MOTOR_MODEL          = 'rs-04'
 PP_VELOCITY_MAX      = 20.0        # rad/s  — profile speed limit
 PP_ACCELERATION      = 10.0        # rad/s² — profile acceleration
 TORQUE_LIMIT         = 2.0         # Nm     — max torque during travel
