@@ -25,6 +25,7 @@ setup(
             'motor_scan_node = rob_py.motor_scan_node:main',
             'vel_control_node = rob_py.vel_control_node:main',
             'pp_control_node = rob_py.pp_control_node:main',
+            '7_dof_v1 = rob_py.7_dof_v1:main',
         ],
     },
 )
