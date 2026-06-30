@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pp_control_node.py
+multi_turn_rs05.py
 ------------------
 Profile-Position (PP, Mode 1) motor control — no ROS topics.
 The motor uses its internal motion profiler to move smoothly between
@@ -23,8 +23,8 @@ from robstride_dynamics import RobstrideBus, Motor
 # ── Configuration ─────────────────────────────────────────────────────────────
 CAN_CHANNEL          = 'can0'
 BITRATE              = 1_000_000   # bps
-MOTOR_ID             = 2
-MOTOR_MODEL          = 'rs-04'
+MOTOR_ID             = 7
+MOTOR_MODEL          = 'rs-05'
 PP_VELOCITY_MAX      = 20.0        # rad/s  — profile speed limit
 PP_ACCELERATION      = 10.0        # rad/s² — profile acceleration
 TORQUE_LIMIT         = 2.0         # Nm     — max torque during travel
@@ -82,9 +82,10 @@ def main(args=None):
         TWO_PI = 2 * math.pi
         multiturn_offset = TWO_PI * round((pos) / TWO_PI)
         
-        # Display unwrapped position to user
+        # Display unwrapped position to user — normalised to [-π, π]
         display_pos = pos - multiturn_offset
-        
+        display_pos = (display_pos + math.pi) % (2 * math.pi) - math.pi
+
         # Hold current position (in motor's coordinate frame)
         target_position = pos
         
@@ -137,8 +138,9 @@ def main(args=None):
             # Continuously write the position target; the motor holds position if
             # the target is unchanged, and the write always returns a status frame.
             pos, vel, trq, temp = bus.control_pp(motor_name, target_position)
-            # Display unwrapped position to user
+            # Display unwrapped position to user — normalised to [-π, π]
             display_pos = pos - multiturn_offset
+            display_pos = (display_pos + math.pi) % (2 * math.pi) - math.pi
             print(
                 f"\r  pos={display_pos:+.4f} rad  vel={vel:+.4f} rad/s  "
                 f"trq={trq:+.4f} Nm  temp={temp:.1f}°C   ",

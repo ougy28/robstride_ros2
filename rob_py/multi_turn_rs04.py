@@ -25,8 +25,8 @@ CAN_CHANNEL          = 'can0'
 BITRATE              = 1_000_000   # bps
 MOTOR_ID             = 2
 MOTOR_MODEL          = 'rs-04'
-PP_VELOCITY_MAX      = 20.0        # rad/s  — profile speed limit
-PP_ACCELERATION      = 10.0        # rad/s² — profile acceleration
+PP_VELOCITY_MAX      = 10.0        # rad/s  — profile speed limit
+PP_ACCELERATION      = 5.0         # rad/s² — profile acceleration
 TORQUE_LIMIT         = 2.0         # Nm     — max torque during travel
 FEEDBACK_RATE_HZ     = 50          # status-poll frequency
 # Move the joint to its mechanical centre, read the RAW encoder value,
@@ -34,8 +34,8 @@ FEEDBACK_RATE_HZ     = 50          # status-poll frequency
 # Tip: Set this to ~π (3.14) to center your ±1.57 rad range and avoid wrapping.
 HOMING_OFFSET        = 3.14        # rad — raw encoder reading at joint zero
 # Soft limits in logical (post-offset) space. Commands are clamped here.
-MIN_POS              = -1.57       # rad  (~-90°)
-MAX_POS              =  1.57       # rad  (~ 90°)
+MIN_POS              = -3.14       # rad  (~-180°)
+MAX_POS              =  3.14       # rad  (~ 180°)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -82,8 +82,8 @@ def main(args=None):
         TWO_PI = 2 * math.pi
         multiturn_offset = TWO_PI * round((pos) / TWO_PI)
         
-        # Display unwrapped position to user
-        display_pos = pos - multiturn_offset
+        # Display unwrapped position to user — normalised to [-π, π]
+        display_pos = (pos - multiturn_offset + math.pi) % (2 * math.pi) - math.pi
         
         # Hold current position (in motor's coordinate frame)
         target_position = pos
@@ -137,8 +137,8 @@ def main(args=None):
             # Continuously write the position target; the motor holds position if
             # the target is unchanged, and the write always returns a status frame.
             pos, vel, trq, temp = bus.control_pp(motor_name, target_position)
-            # Display unwrapped position to user
-            display_pos = pos - multiturn_offset
+            # Display unwrapped position to user — normalised to [-π, π]
+            display_pos = (pos - multiturn_offset + math.pi) % (2 * math.pi) - math.pi
             print(
                 f"\r  pos={display_pos:+.4f} rad  vel={vel:+.4f} rad/s  "
                 f"trq={trq:+.4f} Nm  temp={temp:.1f}°C   ",

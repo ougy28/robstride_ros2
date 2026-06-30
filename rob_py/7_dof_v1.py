@@ -2,10 +2,9 @@
 """
 7_dof_v1.py
 -----------
-Profile-Position (PP, Mode 1) control for a 7-DOF arm — no ROS topics.
-All motors are initialised on the same CAN bus and set to PP mode.
-Type 'm <id>' to switch which motor you are commanding, then enter a
-target position in radians.
+Profile-Position (PP, Mode 1) control for RS-04 motors (IDs 1, 2) and RS-06
+motor (ID 3). Commands all motors independently; each uses its own multi-turn
+offset so displayed positions stay in [-1.57, 1.57] rad.
 
 Run:
     ros2 run rob_py 7_dof_v1
@@ -14,44 +13,56 @@ Run:
 import signal
 import threading
 import time
+import math
 
 import rclpy
 
 from rob_py.can_setup import setup_can_interface
 from robstride_dynamics import RobstrideBus, Motor
 
-# ── CAN bus ───────────────────────────────────────────────────────────────────
-CAN_CHANNEL      = 'can0'
-BITRATE          = 1_000_000   # bps
+# ── Configuration ─────────────────────────────────────────────────────────────
+CAN_CHANNEL     = 'can0'
+BITRATE         = 1_000_000   # bps
+
+# Per-motor settings — extend the dicts to add more motors
+MOTOR_IDS       = [1, 2, 3, 7]
+MOTOR_MODELS    = {
+    1: 'rs-04',
+    2: 'rs-04',
+    3: 'rs-06',
+    7: 'rs-05',
+}
+HOMING_OFFSETS  = {
+    1: 3.14,   # raw encoder reading at joint zero for motor 1
+    2: 3.14,   # raw encoder reading at joint zero for motor 2
+    3: 3.14,   # raw encoder reading at joint zero for motor 3
+    7: 3.14,   # raw encoder reading at joint zero for motor 7
+}
+PP_VELOCITY_MAX = {
+    1: 10.0,   # rad/s
+    2: 10.0,
+    3: 10.0,
+    7: 20.0,
+}
+PP_ACCELERATION = {
+    1:  5.0,   # rad/s²
+    2:  5.0,
+    3:  5.0,
+    7: 10.0,
+}
+TORQUE_LIMIT = {
+    1: 2.0,   # Nm
+    2: 2.0,
+    3: 2.0,
+    7: 2.0,
+}
 FEEDBACK_RATE_HZ = 50
 
-# ── Motor table ──────────────────────────────────────────────────────────────
-# id → (model, vel_max rad/s, accel rad/s², torque_limit Nm,
-#        homing_offset rad,   min_pos rad,  max_pos rad)
-#
-# homing_offset: raw encoder reading when the joint is at its physical zero.
-#   Move each joint to its mechanical centre, read pos from the feedback line,
-#   and enter that value here. This shifts the 0/2π wrap-point away from
-#   the joint's travel range.
-#
-# min_pos / max_pos: soft limits in logical (post-offset) space.
-#   Commands outside this range are clamped with a warning.
-# ─────────────────────────────────────────────────────────────────────────────
-MOTOR_TABLE = {
-    #  id   model    vel    acc  torque  offset  min     max
-    1: ('rs-04', 20.0, 10.0, 2.0,  0.0, -1.57,  1.57),
-    2: ('rs-04', 20.0, 10.0, 2.0,  0.0, -1.57,  1.57),
-    3: ('rs-06', 20.0, 10.0, 4.0,  0.0, -1.57,  1.57),
-    4: ('rs-06', 20.0, 10.0, 4.0,  0.0, -1.57,  1.57),
-    5: ('rs-02', 20.0, 10.0, 1.0,  0.0, -1.57,  1.57),
-    6: ('rs-00', 20.0, 10.0, 1.0,  0.0, -1.57,  1.57),
-    7: ('rs-05', 20.0, 10.0, 3.0,  0.0, -1.57,  1.57),
-}
+MIN_POS = -3.14   # rad  (~-180°)
+MAX_POS  =  3.14  # rad  (~ 180°)
 # ──────────────────────────────────────────────────────────────────────────────
 
-
-def motor_name(mid: int) -> str:
-    return f'motor_{mid}'
+TWO_PI = 2 * math.pi
 
 
 def main(args=None):
@@ -62,45 +73,64 @@ def main(args=None):
         rclpy.shutdown()
         return
 
-    motors      = {motor_name(mid): Motor(id=mid, model=cfg[0])
-                   for mid, cfg in MOTOR_TABLE.items()}
-    calibration = {motor_name(mid): {'direction': 1, 'homing_offset': cfg[4]}
-                   for mid, cfg in MOTOR_TABLE.items()}
+    motors = {
+        f'motor_{mid}': Motor(id=mid, model=MOTOR_MODELS[mid])
+        for mid in MOTOR_IDS
+    }
+    calibration = {
+        f'motor_{mid}': {'direction': 1, 'homing_offset': HOMING_OFFSETS[mid]}
+        for mid in MOTOR_IDS
+    }
 
     bus = RobstrideBus(CAN_CHANNEL, motors, calibration)
     bus.connect(handshake=True)
 
-    # Disable all motors, then switch each to PP mode
-    for mid, (model, vel_max, accel, torque_lim, offset, min_pos, max_pos) in MOTOR_TABLE.items():
-        name = motor_name(mid)
+    # Disable all motors before mode switch
+    for mid in MOTOR_IDS:
         try:
-            bus.disable(name)
+            bus.disable(f'motor_{mid}')
         except Exception:
             pass
     time.sleep(0.3)
 
     active_motors = []
-    for mid, (model, vel_max, accel, torque_lim, offset, min_pos, max_pos) in MOTOR_TABLE.items():
-        name = motor_name(mid)
+    for mid in MOTOR_IDS:
         try:
-            bus.set_pp_mode(name, vel_max=vel_max, acceleration=accel, torque_limit=torque_lim)
+            bus.set_pp_mode(
+                f'motor_{mid}',
+                vel_max=PP_VELOCITY_MAX[mid],
+                acceleration=PP_ACCELERATION[mid],
+                torque_limit=TORQUE_LIMIT[mid],
+            )
             active_motors.append(mid)
-            print(f"[INFO] Motor {mid} ({model}) — PP mode  "
-                  f"vel_max={vel_max} rad/s  acc={accel} rad/s²  torque_limit={torque_lim} Nm")
+            print(f"[INFO] PP mode active — motor {mid} ({MOTOR_MODELS[mid]}) on {CAN_CHANNEL}  "
+                  f"vel_max={PP_VELOCITY_MAX[mid]} rad/s  acc={PP_ACCELERATION[mid]} rad/s²  "
+                  f"torque_limit={TORQUE_LIMIT[mid]} Nm")
         except Exception as exc:
-            print(f"[WARN] Motor {mid} ({model}) skipped — {exc}")
+            print(f"[WARN] Motor {mid} not available, skipping: {exc}")
 
-    if not active_motors:
-        print("[ERROR] No motors responded. Exiting.")
-        bus.disconnect()
-        rclpy.shutdown()
-        return
+    # Read initial positions and compute multi-turn offsets
+    target_positions   = {}
+    multiturn_offsets  = {}
 
-    print(f"[INFO] Active motors: {active_motors}")
+    for mid in active_motors:
+        name = f'motor_{mid}'
+        try:
+            pos, vel, trq, temp = bus.control_pp(name, 0.0)
+            offset = TWO_PI * round(pos / TWO_PI)
+            multiturn_offsets[mid]  = offset
+            target_positions[mid]   = pos          # hold current position
+            display_pos = pos - offset
+            display_pos = (display_pos + math.pi) % (2 * math.pi) - math.pi
+            print(f"[INFO] Motor {mid} starting position: {display_pos:.4f} rad — holding.")
+            if abs(offset) > 0.01:
+                print(f"       (multi-turn offset: {offset / TWO_PI:.1f} revolutions)")
+        except Exception as exc:
+            print(f"[WARN] Could not read initial position for motor {mid}: {exc}")
+            multiturn_offsets[mid]  = 0.0
+            target_positions[mid]   = 0.0
 
-    running          = True
-    active_id        = active_motors[0]
-    target_positions = {mid: 0.0 for mid in active_motors}
+    running = True
 
     def _shutdown(sig, frame):
         nonlocal running
@@ -110,41 +140,31 @@ def main(args=None):
     signal.signal(signal.SIGTERM, _shutdown)
 
     def _input_thread():
-        nonlocal active_id, running
-        print("\nCommands:")
-        print("  m <id>   — switch active motor (e.g. 'm 3')")
-        print("  <rad>    — set target position for active motor")
-        print("  q        — quit\n")
+        nonlocal running
+        print(f"\nEnter commands as:  <motor_id> <position_rad>  (e.g. '1 0.5')")
+        print(f"Active motors: {active_motors}  |  'q' to quit.\n")
         while running:
             try:
-                line = input(f"[motor_{active_id}]> ").strip()
-                if not line:
-                    continue
+                line = input("> ").strip()
                 if line.lower() == 'q':
                     running = False
                     break
-                if line.lower().startswith('m '):
-                    try:
-                        new_id = int(line.split()[1])
-                        if new_id in active_motors:
-                            active_id = new_id
-                            print(f"  → active motor switched to {active_id} "
-                                  f"({MOTOR_TABLE[active_id][0]})")
-                        else:
-                            print(f"  Unknown motor id. Active motors: {active_motors}")
-                    except (IndexError, ValueError):
-                        print("  Usage: m <id>   e.g. m 3")
-                else:
-                    raw = float(line)
-                    cfg = MOTOR_TABLE[active_id]
-                    min_pos, max_pos = cfg[5], cfg[6]
-                    clamped = max(min_pos, min(max_pos, raw))
-                    if clamped != raw:
-                        print(f"  [WARN] {raw:.4f} rad out of limits [{min_pos:.4f}, {max_pos:.4f}] — clamped to {clamped:.4f} rad")
-                    target_positions[active_id] = clamped
-                    print(f"  → motor_{active_id} target = {clamped:.4f} rad")
+                parts = line.split()
+                if len(parts) != 2:
+                    print("  Usage: <motor_id> <position_rad>   e.g.  1 0.5")
+                    continue
+                mid  = int(parts[0])
+                raw  = float(parts[1])
+                if mid not in active_motors:
+                    print(f"  Unknown motor id {mid}. Valid ids: {MOTOR_IDS}")
+                    continue
+                clamped = max(MIN_POS, min(MAX_POS, raw))
+                if clamped != raw:
+                    print(f"  [WARN] {raw:.4f} rad clamped to [{MIN_POS:.4f}, {MAX_POS:.4f}]")
+                target_positions[mid] = clamped + multiturn_offsets[mid]
+                print(f"  → motor {mid} target set to {clamped:.4f} rad")
             except ValueError:
-                print("  Invalid input. Enter a number in radians, or 'm <id>' to switch motor.")
+                print("  Invalid input. Enter: <int motor_id> <float position_rad>")
             except EOFError:
                 running = False
                 break
@@ -155,51 +175,50 @@ def main(args=None):
     dt = 1.0 / FEEDBACK_RATE_HZ
 
     while running:
-        name = motor_name(active_id)
-        try:
-            pos, vel, trq, temp = bus.control_pp(name, target_positions[active_id])
-            print(
-                f"\r[motor_{active_id}]  pos={pos:+.4f} rad  vel={vel:+.4f} rad/s  "
-                f"trq={trq:+.4f} Nm  temp={temp:.1f}°C   ",
-                end='', flush=True,
-            )
-        except Exception as exc:
-            print(f"\n[WARN] Loop error: {exc}")
-
+        parts = []
+        for mid in active_motors:
+            name = f'motor_{mid}'
+            try:
+                pos, vel, trq, temp = bus.control_pp(name, target_positions[mid])
+                display_pos = pos - multiturn_offsets[mid]
+                display_pos = (display_pos + math.pi) % (2 * math.pi) - math.pi
+                parts.append(
+                    f"M{mid}: pos={display_pos:+.4f} vel={vel:+.4f} trq={trq:+.4f} {temp:.1f}°C"
+                )
+            except Exception as exc:
+                parts.append(f"M{mid}: ERROR({exc})")
+        print(f"\r  {'   |   '.join(parts)}   ", end='', flush=True)
         time.sleep(dt)
 
-    print("\n[INFO] Current motor positions:")
+    print("\n[INFO] Final positions:")
     for mid in active_motors:
-        name = motor_name(mid)
+        name = f'motor_{mid}'
         try:
             pos, vel, trq, temp = bus.control_pp(name, target_positions[mid])
-            print(f"  motor_{mid} ({MOTOR_TABLE[mid][0]}):  pos={pos:+.4f} rad  "
-                  f"vel={vel:+.4f} rad/s  trq={trq:+.4f} Nm  temp={temp:.1f}°C")
+            display_pos = pos - multiturn_offsets[mid]
+            display_pos = (display_pos + math.pi) % (2 * math.pi) - math.pi
+            print(f"  Motor {mid}: pos={display_pos:+.4f} rad  vel={vel:+.4f}  trq={trq:+.4f}  temp={temp:.1f}°C")
         except Exception as exc:
-            print(f"  motor_{mid}: could not read — {exc}")
+            print(f"  Motor {mid}: Could not read — {exc}")
 
     try:
         confirm = input("\nReturn all motors to zero position? [y/N]: ").strip().lower()
     except EOFError:
         confirm = 'n'
 
-    if confirm == 'y':
-        print("[INFO] Returning all motors to home position ...")
-        for mid in active_motors:
-            name = motor_name(mid)
-            try:
-                bus.control_pp(name, 0.0)
-            except Exception:
-                pass
-    else:
-        print("[INFO] Skipping home — motors left at current positions.")
-    time.sleep(0.8)
     for mid in active_motors:
-        name = motor_name(mid)
+        name = f'motor_{mid}'
         try:
+            if confirm == 'y':
+                bus.control_pp(name, multiturn_offsets[mid])   # logical zero
             bus.disable(name)
         except Exception:
             pass
+
+    if confirm == 'y':
+        print("[INFO] Returning to home — waiting 0.8 s ...")
+        time.sleep(0.8)
+
     try:
         bus.disconnect()
     except Exception:
